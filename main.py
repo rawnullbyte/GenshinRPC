@@ -13,6 +13,7 @@ from colorama import Fore, Back, Style
 from PIL import Image
 from io import BytesIO
 import term_image
+import term_image.image
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 
@@ -23,7 +24,7 @@ DISCORD_TOKEN = "" # Discord account token
 CLAIM_DAILY_REWARDS = True  # Set to False if you don't want to claim daily rewards
 GENSHIN_UID = 12345
 V2UID = 12345
-V2TOKEN = "v2_......."
+V2TOKEN = "v2_..."
 GAME_SERVER = "os_euro"
 # Other servers:
 # os_usa - North America
@@ -72,13 +73,20 @@ class DiscordSelfBot:
         self.token = token
         self.ws = None
         self.logger = setup_logger()
+        self.start_time = int(datetime.now().timestamp() * 1000)
 
     async def connect(self):
         extra = {'task': 'DiscordRPC'}
-        self.logger.info(f"{Fore.CYAN}Connecting to Discord WebSocket...{Style.RESET_ALL}", extra=extra)
-        self.ws = await websockets.connect('wss://gateway.discord.gg/?v=9&encoding=json', max_size=None)
-        self.logger.info(f"{Fore.GREEN}WebSocket connection established.{Style.RESET_ALL}", extra=extra)
-        await self.identify()
+        while True:
+            try:
+                self.logger.info(f"{Fore.CYAN}Connecting to Discord WebSocket...{Style.RESET_ALL}", extra=extra)
+                self.ws = await websockets.connect('wss://gateway.discord.gg/?v=9&encoding=json', max_size=None, ping_timeout=60, ping_interval=30)
+                self.logger.info(f"{Fore.GREEN}WebSocket connection established.{Style.RESET_ALL}", extra=extra)
+                await self.identify()
+                break
+            except Exception as e:
+                self.logger.error(f"{Fore.RED}Connection error: {e}. Retrying in 5 seconds...{Style.RESET_ALL}", extra=extra)
+                await asyncio.sleep(5)
 
     async def identify(self):
         extra = {'task': 'DiscordRPC'}
@@ -102,51 +110,70 @@ class DiscordSelfBot:
 
     async def receive_hello(self):
         while True:
-            message = await self.ws.recv()
-            data = json.loads(message)
-            if data.get('op') == 10:  # Hello event
-                heartbeat_interval = data['d']['heartbeat_interval']
-                asyncio.create_task(self.send_heartbeat(heartbeat_interval))
+            try:
+                message = await self.ws.recv()
+                data = json.loads(message)
+                if data.get('op') == 10:  # Hello event
+                    heartbeat_interval = data['d']['heartbeat_interval']
+                    asyncio.create_task(self.send_heartbeat(heartbeat_interval))
+                    break
+            except websockets.exceptions.ConnectionClosed:
+                await self.connect()
                 break
 
     async def send_heartbeat(self, interval):
         extra = {'task': 'DiscordHeartbeat'}
         while True:
-            await asyncio.sleep(interval / 1000)
-            heartbeat_payload = {"op": 1, "d": None}
-            await self.ws.send(json.dumps(heartbeat_payload))
-            self.logger.info(f"{Fore.CYAN}Heartbeat sent{Style.RESET_ALL}", extra=extra)
+            try:
+                await asyncio.sleep(interval / 1000)
+                heartbeat_payload = {"op": 1, "d": None}
+                await self.ws.send(json.dumps(heartbeat_payload))
+                self.logger.info(f"{Fore.CYAN}Heartbeat sent{Style.RESET_ALL}", extra=extra)
+            except websockets.exceptions.ConnectionClosed:
+                await self.connect()
+                break
+            except Exception as e:
+                self.logger.error(f"{Fore.RED}Heartbeat error: {e}{Style.RESET_ALL}", extra=extra)
+                await asyncio.sleep(5)
 
     async def update_activity(self, details, state):
         extra = {'task': 'DiscordRPC'}
-        self.logger.info(f"{Fore.CYAN}Updating Discord activity...{Style.RESET_ALL}", extra=extra)
-        activity_payload = {
-            "op": 3,
-            "d": {
-                "since": 0,
-                "activities": [{
-                    "type": 0,
-                    "name": "Genshin Impact",
-                    "application_id": "1261185993000747150",
-                    "details": details[:128],
-                    "state": state[:128],
-                    "assets": {
-                        "large_image": "1269863139680194681",
-                        "large_text": "Genshin Impact"
-                    }
-                }],
-                "status": "online",
-                "afk": False
+        try:
+            self.logger.info(f"{Fore.CYAN}Updating Discord activity...{Style.RESET_ALL}", extra=extra)
+            activity_payload = {
+                "op": 3,
+                "d": {
+                    "since": self.start_time,
+                    "activities": [{
+                        "type": 0,
+                        "name": "Genshin Impact",
+                        "application_id": "1261185993000747150",
+                        "details": details[:128],
+                        "state": state[:128],
+                        "timestamps": {
+                            "start": self.start_time
+                        },
+                        "assets": {
+                            "large_image": "1269863139680194681",
+                            "large_text": "Genshin Impact"
+                        }
+                    }],
+                    "status": "online",
+                    "afk": False
+                }
             }
-        }
-        await self.ws.send(json.dumps(activity_payload))
-        self.logger.info(f"{Fore.GREEN}Activity updated with details: {Fore.YELLOW}{details}{Fore.GREEN}, state: {Fore.YELLOW}{state}{Style.RESET_ALL}", extra=extra)
+            await self.ws.send(json.dumps(activity_payload))
+            self.logger.info(f"{Fore.GREEN}Activity updated with details: {Fore.YELLOW}{details}{Fore.GREEN}, state: {Fore.YELLOW}{state}{Style.RESET_ALL}", extra=extra)
+        except websockets.exceptions.ConnectionClosed:
+            await self.connect()
+            await self.update_activity(details, state)
+        except Exception as e:
+            self.logger.error(f"{Fore.RED}Activity update error: {e}{Style.RESET_ALL}", extra=extra)
+            await asyncio.sleep(5)
 
 def display_reward_image(reward):
     try:
-        response = requests.get(reward.icon)
-        img = Image.open(BytesIO(response.content))
-        term_image.image(img)
+        term_image.image.from_url(reward.icon).draw()
     except Exception as e:
         print(f"{Fore.RED}Could not display image: {e}{Style.RESET_ALL}")
 
@@ -174,6 +201,7 @@ async def update_player_data(client, discord_bot, logger):
         await discord_bot.update_activity(details, state)
     except Exception as e:
         logger.error(f"{Fore.RED}Error updating player data: {e}{Style.RESET_ALL}", extra=extra)
+        await asyncio.sleep(5)
 
 async def scheduled_update_player_data(client, discord_bot, logger):
     await update_player_data(client, discord_bot, logger)
@@ -233,7 +261,11 @@ async def main():
 
     logger.info(f"{Fore.GREEN}Keeping connection alive...{Style.RESET_ALL}", extra=extra)
     while True:
-        logger.info(f"{Fore.CYAN}Sleeping for 30 seconds...{Style.RESET_ALL}", extra=extra)
-        await asyncio.sleep(30)
+        try:
+            logger.info(f"{Fore.CYAN}Sleeping for 30 seconds...{Style.RESET_ALL}", extra=extra)
+            await asyncio.sleep(30)
+        except Exception as e:
+            logger.error(f"{Fore.RED}Main loop error: {e}{Style.RESET_ALL}", extra=extra)
+            await asyncio.sleep(5)
 
 asyncio.run(main())
