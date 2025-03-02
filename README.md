@@ -3,8 +3,6 @@
 
 A Discord Rich Presence client for Genshin Impact that displays your in-game information and automatically claims daily rewards.
 
-![Preview](preview.png)
-
 ## Features
 
 - Displays your Genshin Impact nickname and level on Discord
